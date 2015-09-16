@@ -327,6 +327,29 @@ class TestPagingSize(BasePagingTester, PageAssertionMixin):
         # make sure expected and actual have same data elements (ignoring order)
         self.assertEqualIgnoreOrder(pf.all_data(), expected_data)
 
+    def other_static_columns_paging_test(self):
+        cursor = self.prepare()
+        self.create_ks(cursor, 'test_paging_size', 1)
+
+        cursor.execute("""
+            CREATE TABLE test (
+                k int,
+                v int static,
+                t int,
+                PRIMARY KEY (k, t)
+            )
+        """)
+
+        KEYS = 5
+
+        for i in range(KEYS):
+            cursor.execute("INSERT INTO test (k, v) VALUES (%s, %s)", (i, i))
+
+        keys = ",".join(map(str, range(KEYS)))
+        cursor.default_fetch_size = 3
+        rows = list(cursor.execute("SELECT DISTINCT k, v FROM test WHERE k IN (%s)" % (keys,)))
+        self.assertEqual(KEYS, len(rows))
+
 
 @since('2.0')
 class TestPagingWithModifiers(BasePagingTester, PageAssertionMixin):
