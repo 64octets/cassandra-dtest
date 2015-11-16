@@ -816,16 +816,62 @@ class TestConsistency(Tester):
             query_c1c2(session, n, CL)
 
     def stop_delete_and_restart(self, node_number, column):
+        query = 'BEGIN BATCH '
+        query = query + 'DELETE FROM cf WHERE key=\'k0\' AND c=\'c%06d\'; ' % column
+        query = query + 'DELETE FROM cf WHERE key=\'k0\' AND c=\'c2\'; '
+        query = query + 'APPLY BATCH;'
+        self.stop_query_and_restart(node_number, query)
+
+    def stop_query_and_restart(self, node_number, query):
         to_stop = self.cluster.nodes["node%d" % node_number]
         next_node = self.cluster.nodes["node%d" % (((node_number + 1) % 3) + 1)]
         to_stop.flush()
         to_stop.stop(wait_other_notice=True)
         session = self.patient_cql_connection(next_node, 'ks')
-        query = 'BEGIN BATCH '
-        query = query + 'DELETE FROM cf WHERE key=\'k0\' AND c=\'c%06d\'; ' % column
-        query = query + 'DELETE FROM cf WHERE key=\'k0\' AND c=\'c2\'; '
-        query = query + 'APPLY BATCH;'
         simple_query = SimpleStatement(query, consistency_level=ConsistencyLevel.QUORUM)
-        session.execute(simple_query)
-
+        res = session.execute(simple_query)
         to_stop.start(wait_other_notice=True)
+        return rows_to_list(res)
+
+    def short_tombstone_read_test(self):
+        """
+        @jira_ticket CASSANDRA-8589
+        """
+        cluster = self.cluster
+
+        # Disable hinted handoff and set batch commit log so this doesn't
+        # interfer with the test
+        cluster.set_configuration_options(values={'hinted_handoff_enabled': False}, batch_commitlog=True)
+
+        cluster.populate(3).start(wait_other_notice=True)
+        node1, node2, node3 = cluster.nodelist()
+
+        session = self.patient_cql_connection(node1)
+        self.create_ks(session, 'ks', 3)
+
+        session.execute("CREATE TABLE test (k text, t int, v int, PRIMARY KEY (k, t))")
+
+        # Repeat this test 10 times to make it more easy to spot a null pointer exception caused by a race, see CASSANDRA-9460
+        #for k in xrange(10):
+
+        # Insert 3 rows in a single partition
+        for i in xrange(3):
+            session.execute(SimpleStatement("INSERT INTO test (k, t, v) VALUES ('k', %d, %d)" % (i, i), consistency_level=ConsistencyLevel.ALL))
+
+        # Delete the 2nd row without the 2nd node getting it
+        self.stop_query_and_restart(2, "DELETE FROM test WHERE k = 'k' AND t = 1")
+
+        # Update 3rd row without the 1st node getting it
+        self.stop_query_and_restart(1, "UPDATE test SET v = 3 WHERE k = 'k' AND t = 2")
+
+        # Query with 3rd node (the only node having both the delete and update above) dead
+        # Due to the limit:
+        #   - the 1st node will return the 1st and 3rd row, as well as the 2nd row tombstone, but with the outdated value for the 3rd row
+        #   - the 2nd node will return the 1st and 2nd row.
+        # We must make sure we don't end up returning the 1st and 3rd row, but with the outdated value for the 3rd row.
+        res = self.stop_query_and_restart(3, "SELECT v FROM test WHERE k = 'k' LIMIT 2")
+        expected = [[0], [3]]
+        assert res == expected, "Expected %s but got %s" % (expected, res)
+
+        #truncate_statement = SimpleStatement('TRUNCATE test', consistency_level=ConsistencyLevel.QUORUM)
+        #session.execute(truncate_statement)
