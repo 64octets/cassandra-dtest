@@ -272,3 +272,18 @@ class TestUpgrade8099(Tester):
 
         assert_one(cursor, "SELECT k FROM t", ['some_key'])
 
+    def update_and_drop_column_test(self):
+        cursor = self._setup_cluster()
+
+        cursor.execute('CREATE TABLE t (k text PRIMARY KEY, a int, b int)')
+
+        cursor.execute("INSERT INTO t(k, a, b) VALUES ('some_key', 0, 0)")
+
+        cursor = self._do_upgrade()
+
+        cursor.execute('USE ks')
+        cursor.execute("ALTER TABLE t DROP b")
+
+        self.cluster.compact()
+
+        assert_one(cursor, "SELECT * FROM t", ['some_key', 0])
